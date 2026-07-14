@@ -46,12 +46,28 @@ void main() {
       });
 
       testWithoutContext('No discovery if development team specified in Xcode project', () async {
+        final processManager = FakeProcessManager.list(<FakeCommand>[
+          const FakeCommand(command: <String>['which', 'security']),
+          const FakeCommand(command: <String>['which', 'openssl']),
+          const FakeCommand(
+            command: <String>['security', 'find-identity', '-p', 'codesigning', '-v'],
+            stdout: kCertificates,
+          ),
+          const FakeCommand(
+            command: <String>['security', 'find-certificate', '-c', '1111AAAA11', '-p'],
+            stdout: 'This is a fake certificate',
+          ),
+          const FakeCommand(
+            command: <String>['openssl', 'x509', '-subject'],
+            stdout: 'subject= /CN=iPhone Developer: Profile 1 (1111AAAA11)/OU=abc/O=My Team/C=US',
+          ),
+        ]);
         final logger = BufferLogger.test();
         final Map<String, String>? signingConfigs =
             await getCodeSigningIdentityDevelopmentTeamBuildSetting(
               buildSettings: <String, String>{'DEVELOPMENT_TEAM': 'abc'},
               platform: FakePlatform(operatingSystem: 'macos'),
-              processManager: FakeProcessManager.empty(),
+              processManager: processManager,
               logger: logger,
               config: Config.test(),
               terminal: FakeTerminal(),
@@ -63,12 +79,43 @@ void main() {
         expect(
           logger.statusText,
           equals(
-            'Automatically signing iOS for device deployment using specified development team in Xcode project: abc\n',
+            'Automatically signing iOS for device deployment using specified development team in Xcode project: abc (My Team)\n',
           ),
         );
         expect(logger.errorText, isEmpty);
-        expect(logger.traceText, isEmpty);
+        expect(processManager, hasNoRemainingExpectations);
       });
+
+      testWithoutContext(
+        'Logs only development team id if team name lookup is unavailable',
+        () async {
+          final processManager = FakeProcessManager.list(<FakeCommand>[
+            const FakeCommand(command: <String>['which', 'security'], exitCode: 1),
+          ]);
+          final logger = BufferLogger.test();
+          final Map<String, String>? signingConfigs =
+              await getCodeSigningIdentityDevelopmentTeamBuildSetting(
+                buildSettings: <String, String>{'DEVELOPMENT_TEAM': 'abc'},
+                platform: FakePlatform(operatingSystem: 'macos'),
+                processManager: processManager,
+                logger: logger,
+                config: Config.test(),
+                terminal: FakeTerminal(),
+                fileSystem: MemoryFileSystem.test(),
+                fileSystemUtils: FakeFileSystemUtils(),
+                plistParser: FakePlistParser(),
+              );
+          expect(signingConfigs, isNull);
+          expect(
+            logger.statusText,
+            equals(
+              'Automatically signing iOS for device deployment using specified development team in Xcode project: abc\n',
+            ),
+          );
+          expect(logger.errorText, isEmpty);
+          expect(processManager, hasNoRemainingExpectations);
+        },
+      );
 
       testWithoutContext('No misleading log when CODE_SIGN_STYLE is Manual', () async {
         final logger = BufferLogger.test();

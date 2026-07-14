@@ -178,25 +178,6 @@ Future<Map<String, String>?> getCodeSigningIdentityDevelopmentTeamBuildSetting({
   required FileSystemUtils fileSystemUtils,
   required PlistParser plistParser,
 }) async {
-  // If the user already has it set in the project build settings itself,
-  // continue with that.
-  if (_isNotEmpty(buildSettings[_developmentTeamBuildSettingName])) {
-    // Only log "Automatically signing..." if CODE_SIGN_STYLE is Automatic or not set.
-    // If it's Manual, the signing is not automatic.
-    final String? codeSignStyle = buildSettings[_codeSignStyleBuildSettingName];
-    if (codeSignStyle != _CodeSigningStyle.manual.label) {
-      logger.printStatus(
-        'Automatically signing iOS for device deployment using specified development '
-        'team in Xcode project: ${buildSettings[_developmentTeamBuildSettingName]}',
-      );
-    }
-    return null;
-  }
-
-  if (_isNotEmpty(buildSettings[_provisioningProfileBuildSettingName])) {
-    return null;
-  }
-
   final settings = XcodeCodeSigningSettings(
     config: config,
     logger: logger,
@@ -207,6 +188,28 @@ Future<Map<String, String>?> getCodeSigningIdentityDevelopmentTeamBuildSetting({
     terminal: terminal,
     plistParser: plistParser,
   );
+
+  // If the user already has it set in the project build settings itself,
+  // continue with that.
+  if (_isNotEmpty(buildSettings[_developmentTeamBuildSettingName])) {
+    // Only log "Automatically signing..." if CODE_SIGN_STYLE is Automatic or not set.
+    // If it's Manual, the signing is not automatic.
+    final String? codeSignStyle = buildSettings[_codeSignStyleBuildSettingName];
+    if (codeSignStyle != _CodeSigningStyle.manual.label) {
+      final String teamId = buildSettings[_developmentTeamBuildSettingName]!;
+      final String? teamName = await settings._getTeamNameForTeamId(teamId);
+      final displayTeam = _isNotEmpty(teamName) ? '$teamId ($teamName)' : teamId;
+      logger.printStatus(
+        'Automatically signing iOS for device deployment using specified development '
+        'team in Xcode project: $displayTeam',
+      );
+    }
+    return null;
+  }
+
+  if (_isNotEmpty(buildSettings[_provisioningProfileBuildSettingName])) {
+    return null;
+  }
 
   return settings._getCodeSigningBuildSettings();
 }
@@ -649,18 +652,45 @@ class XcodeCodeSigningSettings {
     return info?.teamId;
   }
 
+  /// Looks up the team name for a given [teamId] from available code-signing identities.
+  ///
+  /// Returns null if no matching identity contains a non-empty team name.
+  Future<String?> _getTeamNameForTeamId(String teamId) async {
+    if (!_platform.isMacOS) {
+      return null;
+    }
+    final bool toolsValidated = await validateCodeSignSearchTools();
+    if (!toolsValidated) {
+      return null;
+    }
+
+    final List<String> validCodeSigningIdentities = await getSigningIdentities();
+    for (final identity in validCodeSigningIdentities) {
+      final _CertificateTeamInfo? info = await _getCertificateTeamInfo(identity, printError: false);
+      if (info != null && info.teamId == teamId) {
+        return info.teamName;
+      }
+    }
+    return null;
+  }
+
   /// Looks up [_CertificateTeamInfo] (team ID and team name) for the given
   /// [identity] by running `security find-certificate` and `openssl x509 -subject`.
   ///
   /// Returns null if the certificate cannot be found or parsed.
-  Future<_CertificateTeamInfo?> _getCertificateTeamInfo(String identity) async {
+  Future<_CertificateTeamInfo?> _getCertificateTeamInfo(
+    String identity, {
+    bool printError = true,
+  }) async {
     final String? signingCertificateId = _securityFindIdentityCertificateCnExtractionPattern
         .firstMatch(identity)
         ?.group(1);
 
     // If `security`'s output format changes, we'd have to update the above regex.
     if (signingCertificateId == null) {
-      _logger.printError('Unable to parse common name from code-signing certificate $identity');
+      if (printError) {
+        _logger.printError('Unable to parse common name from code-signing certificate $identity');
+      }
       return null;
     }
     String signingCertificateStdout;
@@ -673,7 +703,9 @@ class XcodeCodeSigningSettings {
         '-p',
       ], throwOnError: true)).stdout.trim();
     } on ProcessException catch (error) {
-      _logger.printError('Unexpected error from security: $error');
+      if (printError) {
+        _logger.printError('Unexpected error from security: $error');
+      }
       return null;
     }
 
@@ -698,7 +730,9 @@ class XcodeCodeSigningSettings {
     unawaited(opensslProcess.stderr.drain<String?>());
 
     if (await opensslProcess.exitCode != 0) {
-      _logger.printError('Failed to get subject name for code-signing certificate $identity');
+      if (printError) {
+        _logger.printError('Failed to get subject name for code-signing certificate $identity');
+      }
       return null;
     }
 
@@ -706,9 +740,11 @@ class XcodeCodeSigningSettings {
         .firstMatch(opensslOutput)
         ?.group(1);
     if (teamId == null) {
-      _logger.printError(
-        'Unable to parse development team from code-signing certificate $identity',
-      );
+      if (printError) {
+        _logger.printError(
+          'Unable to parse development team from code-signing certificate $identity',
+        );
+      }
       return null;
     }
 
